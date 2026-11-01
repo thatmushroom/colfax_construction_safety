@@ -224,3 +224,5 @@ __marimo__/
 analysis/output/
 analysis/figures/
 report/colfax_report.html
+data/
+.posit/
