@@ -86,3 +86,9 @@ def test_combine_corridor_sums_colfax_and_alt():
     corridor = c.filter(pl.col("group") == "corridor").sort("year")["n"].to_list()
     assert corridor == [14, 9]
     assert c.filter(pl.col("group") == "rest").height == 2
+
+
+def test_wide_groups_labels_streets_and_keeps_missing_coordinates():
+    df = pl.DataFrame({"zone": ["colfax", "alt_13th", "alt_14th", "alt_16th", "alt_17th", "rest", None]})
+    g = ca.wide_groups(df).get_column("group").to_list()
+    assert g == ["colfax", "alt", "alt", "alt", "alt", "rest", None]

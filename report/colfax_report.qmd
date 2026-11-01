@@ -64,7 +64,7 @@ def side(key, cols=None):
 
 1. **The data do not agree on what counts as "severe."** The crash file's offense codes and its injury-count columns give different totals and trends, and neither reproduces the city dashboard's 94 deaths for 2025. Both versions are shown side by side. The Colfax result holds under each, but any death or SBI total should be confirmed with the city.
 2. **There are very few events.** Colfax had only 4 to 8 severe crashes during construction, so the estimates are imprecise (the plausible range runs from about a 20% drop to about a 90% drop). Deaths alone are too few to test.
-3. **This is a before-and-after comparison, not an experiment.** There is no traffic-volume data, so a drop could reflect fewer cars or construction closures rather than safer conditions. Colfax crashes also peaked in 2021-2023, so some of the drop may be a return to normal. The 13th / 14th Ave results suggest some crashes may have shifted there, but with 15-16 events, and when the two corridors are combined the net reduction is not statistically clear.
+3. **This is a before-and-after comparison, not an experiment.** There is no traffic-volume data, so a drop could reflect fewer cars or construction closures rather than safer conditions. Colfax crashes also peaked in 2021-2023, so some of the drop may be a return to normal. The 13th / 14th Ave results suggest some crashes may have shifted there, but with 15-16 events, and when the streets are combined (including the wider five-street corridor) the net reduction is not statistically clear.
 
 The sections below give the details. The Summary table is the quickest way to see every test at once.
 
@@ -85,12 +85,14 @@ Two definitions of a "severe" crash are shown side by side throughout, because t
 | Colfax vs citywide, exact conditional Poisson (rate-ratio ratio, 95% CI) | 0.38 (0.16-0.78), p = 0.004 | 0.26 (0.07-0.68), p = 0.002 |
 | 13th / 14th Ave vs citywide (rate ratio, 95% CI) | 1.5 (0.85-2.7), p = 0.16 | 2.0 (1.2-3.5), p = 0.013 |
 | Colfax + 13th / 14th Ave combined vs citywide (rate ratio, 95% CI) | 0.75 (0.48-1.16), p = 0.19 | 0.85 (0.53-1.36), p = 0.51 |
+| Wider corridor (13th, 14th, Colfax, 16th, 17th Ave) vs citywide (rate ratio, 95% CI) | 0.73 (0.48-1.10), p = 0.13 | 0.73 (0.47-1.13), p = 0.16 |
 
 - **Colfax:** Under both definitions, severe crashes between Broadway and Colorado Blvd fell much more than in the rest of the city. The estimate is stable across buffer widths, trend adjustment, dropping 2020, and restricting the pre period to 2021-2024. It is weaker for all crashes (about 0.66) and not testable for deaths alone (too few events).
 - **Not a citywide reduction:** In the same Jan 1 to Sep 27 windows, severe crashes in the rest of the city were flat to slightly higher in 2025-2026 than in 2013-2024. Citywide, 2026 was higher than 2025 under both definitions (A: 276 to 321; B: 286 to 300). This conflicts with the premise that serious injuries and deaths are down year over year in 2026. The "down" pattern appears only for 2025 vs 2024 under definition A (350 to 276), and possibly in the dashboard's death total (see Data quality).
 - **Spatial tests:** Colfax ranks at the extreme low end of same-length placebo corridors, though the evidence weakens as the placebo set widens. The citywide scan finds no significant cold cluster, but circles fit a thin corridor poorly, so this check carries little weight.
 - **13th / 14th Ave:** Severe crashes there fell less than the city under both definitions. The result is statistically convincing only under B, and rests on 15-16 events. It is consistent with some displacement but does not establish it. All crashes on these routes did not change relative to the city.
 - **Combined corridor:** Treating Colfax and 13th / 14th Ave as one unit, severe crashes fell about 15-25% relative to the city, but the interval is wide and includes no change (see [Combined corridor](#combined-corridor)). The Colfax-specific drop is largely offset by the alternative-route increase, though this does not by itself prove displacement.
+- **Wider corridor:** Adding 16th and 17th Ave to the combined unit gives a similar picture: severe crashes fell about 27% relative to the city, with an interval that includes no change (see [Wider corridor](#wider-corridor)).
 - **Caveat:** This is an observational comparison with few events. A drop concentrated on Colfax is consistent with construction having an effect, but regression to the mean (under A, Colfax peaked in 2021-2023) or lower traffic volume are alternative explanations.
 
 ## Data quality {#data-quality}
@@ -471,6 +473,128 @@ pl.concat(
 - **Fragile under A:** The A estimate becomes statistically significant when pre-trends are allowed (0.57, p = 0.03) or when only 2021-2024 is used as the baseline (0.59, p = 0.03; exact two-sided p = 0.02). Under B it stays near 0.8-0.85 with p about 0.5 in every specification. The combined result therefore depends on the definition and baseline.
 - **All crashes:** The combined unit shows a clear reduction (about 0.83, 95% CI 0.77-0.91) that persists across specifications. All-crash counts fell on Colfax but not on the alternative routes (see above), so the all-crash drop is carried by Colfax.
 - **Interpretation:** The data are consistent with a net safety benefit across the corridor and with essentially no net benefit. They cannot distinguish a real displacement of severe crashes onto 13th / 14th Ave from chance, given about 23 combined events in the construction period. Merging also dilutes any Colfax-specific effect, and the alternative routes were not themselves under construction.
+
+## Wider corridor: 13th, 14th, Colfax, 16th and 17th Ave {#wider-corridor}
+
+The combined unit is widened to five parallel streets between Broadway and Colorado Blvd: 13th, 14th, Colfax, 16th and 17th Ave (about 570-590 ft apart). As before, each crash is assigned to the nearest street centerline if it is within 250 ft, and everything else is the citywide baseline. Because the unit is larger, the rest-of-city baseline now also excludes 16th and 17th Ave crashes. The same tests are repeated, except the placebo-corridor and spatial-scan tests, which follow single street names and cannot be matched to a five-street band. This widening was decided after seeing the earlier results, so it is an exploratory comparison.
+
+```{python}
+dfw, geomw = ca.prepare_wide()
+dfw_all = dfw.with_columns(pl.lit(True).alias("all_crashes"))
+WD = {
+    "A": ca.wide_analysis(dfw, "severe"),
+    "B": ca.wide_analysis(dfw, "severe_counts"),
+    "all": ca.wide_analysis(dfw_all, "all_crashes"),
+}
+pl.concat(
+    [
+        WD["A"]["counts"].pivot(on="group", index="year", values="n").with_columns(pl.lit("A").alias("def")),
+        WD["B"]["counts"].pivot(on="group", index="year", values="n").with_columns(pl.lit("B").alias("def")),
+    ]
+).select("def", "year", "corridor", "rest").sort("def", "year")
+```
+
+Average severe crashes per year on each street, before (2013-2024) and during (2025-2026) construction:
+
+```{python}
+pl.concat(
+    [
+        WD["A"]["by_street"].with_columns(pl.lit(LAB_A).alias("definition")),
+        WD["B"]["by_street"].with_columns(pl.lit(LAB_B).alias("definition")),
+    ]
+).select("definition", "zone", "construction", "n", "years", "per_year")
+```
+
+Wide-corridor rate ratio relative to the citywide change (below 1 means the corridor fell more than the city):
+
+```{python}
+def wide_rows(key, label):
+    r = WD[key]
+    parts = [
+        r["did"].with_columns(pl.lit("primary").alias("model")),
+        r["did_by_year"].with_columns(pl.lit("by year").alias("model")),
+        r["did_trend"].filter(pl.col("term") == "corridor_post").with_columns(pl.lit("zone-specific linear trend").alias("model")),
+        r["did_no2020"].with_columns(pl.lit("excluding 2020").alias("model")),
+        r["did_2021_on"].with_columns(pl.lit("pre period 2021-2024 only").alias("model")),
+    ]
+    return pl.concat(parts).with_columns(pl.lit(label).alias("definition"))
+
+
+pl.concat([wide_rows("A", LAB_A), wide_rows("B", LAB_B), wide_rows("all", "all crashes")]).select(
+    "definition", "model", "term", "rate_ratio", "ci_low", "ci_high", "p_value"
+)
+```
+
+Exact conditional Poisson test and Fisher test for the wide corridor:
+
+```{python}
+pl.concat(
+    [
+        WD["A"]["exact"].with_columns(pl.lit(LAB_A).alias("definition")),
+        WD["B"]["exact"].with_columns(pl.lit(LAB_B).alias("definition")),
+        WD["all"]["exact"].with_columns(pl.lit("all crashes").alias("definition")),
+    ]
+).select(
+    "definition", "pre_period", "pre_count", "post_count", "citywide_rate_ratio",
+    "expected_post_count", "relative_rate_ratio", "ci_low", "ci_high", "p_lower_tail", "p_two_sided",
+)
+```
+
+```{python}
+pl.concat(
+    [
+        pl.DataFrame([WD[k]["fisher"]]).with_columns(pl.lit(lab).alias("definition"))
+        for k, lab in (("A", LAB_A), ("B", LAB_B), ("all", "all crashes"))
+    ]
+).select("definition", "pre_group", "post_group", "pre_rest", "post_rest", "odds_ratio", "ci_low", "ci_high", "p_value")
+```
+
+Colfax versus the four other streets (13th, 14th, 16th, 17th Ave pooled), each relative to the rest of the city:
+
+```{python}
+pl.concat(
+    [
+        WD["A"]["did_three_group"].with_columns(pl.lit(LAB_A).alias("definition")),
+        WD["B"]["did_three_group"].with_columns(pl.lit(LAB_B).alias("definition")),
+        WD["all"]["did_three_group"].with_columns(pl.lit("all crashes").alias("definition")),
+    ]
+).with_columns(
+    pl.when(pl.col("term") == "colfax_post").then(pl.lit("Colfax")).otherwise(pl.lit("13th/14th/16th/17th Ave")).alias("unit")
+).select("definition", "unit", "rate_ratio", "ci_low", "ci_high", "p_value")
+```
+
+Corridor buffer width (feet) and leave-one-pre-period-year-out:
+
+```{python}
+pl.concat(
+    [
+        ca.wide_buffer_sensitivity(dfw, geomw, outcome="severe").with_columns(pl.lit(LAB_A).alias("definition")),
+        ca.wide_buffer_sensitivity(dfw, geomw, outcome="severe_counts").with_columns(pl.lit(LAB_B).alias("definition")),
+    ]
+).select("definition", "buffer_ft", "n_corridor", "rate_ratio", "ci_low", "ci_high", "p_value")
+```
+
+```{python}
+pl.concat(
+    [
+        WD[k]["loo"].filter((pl.col("unit") == "corridor") & (pl.col("omitted_year") != "none (all years)")).with_columns(pl.lit(lab).alias("definition"))
+        for k, lab in (("A", LAB_A), ("B", LAB_B), ("all", "all crashes"))
+    ]
+).group_by("definition").agg(
+    pl.col("rate_ratio").min().alias("rr_min"),
+    pl.col("rate_ratio").max().alias("rr_max"),
+    pl.col("p_value").min().alias("p_min"),
+    pl.col("p_value").max().alias("p_max"),
+).sort("definition")
+```
+
+- **Severe crashes:** The wide corridor fell about 27% relative to the city under both definitions (A: 0.73, 95% CI 0.48-1.10, p = 0.13; B: 0.73, 0.47-1.13, p = 0.16). Neither is distinguishable from no change. The by-year estimates are similarly imprecise, and the estimate is stable across buffer widths (0.71-0.75 under A, 0.73-0.78 under B) and when any single pre-period year is dropped (0.71-0.77 under A, 0.70-0.75 under B).
+- **Baseline-dependent under A:** As with the narrower combined unit, the A estimate becomes significant when pre-trends are allowed (0.54, p = 0.009) or when only 2021-2024 is the baseline (0.58, p = 0.012; exact two-sided p = 0.009). The wide corridor was already rising faster than the city before construction (about 5% a year under A, p = 0.02). Under B, those same specifications give 0.80 (p = 0.40) and 0.75 (p = 0.28).
+- **Compared with the narrower combined unit:** Adding 16th and 17th Ave changes little (A: 0.73 vs 0.75; B: 0.73 vs 0.85). The extra streets have few events and mixed movements.
+- **By street:** Colfax is the only street with a large, consistent drop (about 10 to 4 severe crashes a year under A, 9.8 to 2.0 under B). 14th Ave rose under both definitions (about 2.8 to 4.5 under A, 3.0 to 6.0 under B). 13th Ave rose under A and was flat under B. 16th Ave fell (about 1.5 to 0.5 under A, 2.3 to 0 under B), as did 17th Ave under B. These per-street counts are one to a few events a year, so individual street changes are not reliable.
+- **Colfax vs the other four streets:** Pooling 13th, 14th, 16th and 17th Ave, severe crashes there did not clearly change relative to the city (A: 1.15, 0.70-1.87; B: 1.20, 0.73-1.96), whereas Colfax fell (A: 0.38; B: 0.25).
+- **All crashes:** The wide corridor shows a clear reduction (0.83, 95% CI 0.76-0.91, p < 0.001) in every specification, driven mainly by Colfax (0.66 alone); the other four streets together did not change (0.94, p = 0.21).
+- **Interpretation:** Over this broader area the data are consistent with a modest net reduction in severe crashes and with no net change. Widening the unit dilutes Colfax's large drop with five-street noise, so it cannot show whether crashes shifted onto parallel streets: the pooled other streets are about flat (rate ratios near 1.1-1.2) with wide intervals.
 
 ## Limitations
 

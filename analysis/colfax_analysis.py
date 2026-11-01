@@ -196,7 +196,15 @@ STREET_PATTERNS = {
 }
 
 
-def corridor_geometry(df: pl.DataFrame) -> dict:
+# Wider corridor: adds 16th and 17th Ave (north of Colfax) to Colfax, 13th and 14th Ave
+WIDE_PATTERNS = {
+    **STREET_PATTERNS,
+    "alt_16th": r"\b16TH AVE\b",
+    "alt_17th": r"\b17TH AVE\b",
+}
+
+
+def corridor_geometry(df: pl.DataFrame, patterns: dict | None = None) -> dict:
     """Estimate the study extent and street centerlines from the data.
 
     Extent: median x of crashes recorded at the Colfax/Broadway and
@@ -208,7 +216,7 @@ def corridor_geometry(df: pl.DataFrame) -> dict:
     x_w = a.filter(colfax_addr & pl.col("addr").str.contains("BROADWAY")).get_column("x").median()
     x_e = a.filter(colfax_addr & pl.col("addr").str.contains("COLORADO BLVD")).get_column("x").median()
     lines = {}
-    for name, pat in STREET_PATTERNS.items():
+    for name, pat in (patterns or STREET_PATTERNS).items():
         s = a.filter(
             pl.col("addr").str.contains(pat)
             & pl.col("x").is_between(x_w, x_e)
@@ -539,6 +547,75 @@ def leave_one_year_out(df: pl.DataFrame, outcome: str = "severe") -> pl.DataFram
             rows.append({"omitted_year": label, "unit": r["term"].replace("_post", "")} | {k: r[k] for k in ("rate_ratio", "ci_low", "ci_high", "p_value")})
         for r in did_combined(comb, drop_years=drop).iter_rows(named=True):
             rows.append({"omitted_year": label, "unit": "corridor"} | {k: r[k] for k in ("rate_ratio", "ci_low", "ci_high", "p_value")})
+    return pl.DataFrame(rows)
+
+
+def prepare_wide(buffer_ft: float = 250.0) -> tuple[pl.DataFrame, dict]:
+    """Like :func:`prepare` but for the wide corridor: Colfax, 13th, 14th, 16th
+    and 17th Ave between Broadway and Colorado Blvd. ``group`` is ``colfax``,
+    ``alt`` (the four other streets) or ``rest`` (everything else), so the
+    existing combined / leave-one-out functions apply unchanged and merge the
+    five streets into one ``corridor`` unit.
+    """
+    df = add_period(load_crashes())
+    geom = corridor_geometry(df, WIDE_PATTERNS)
+    return wide_groups(assign_zones(df, geom, buffer_ft=buffer_ft)), geom
+
+
+def wide_groups(df: pl.DataFrame) -> pl.DataFrame:
+    return df.with_columns(
+        pl.when(pl.col("zone").is_null())
+        .then(None)
+        .when(pl.col("zone") == "colfax")
+        .then(pl.lit("colfax"))
+        .when(pl.col("zone") == "rest")
+        .then(pl.lit("rest"))
+        .otherwise(pl.lit("alt"))
+        .alias("group")
+    )
+
+
+def wide_analysis(df_w: pl.DataFrame, outcome: str = "severe") -> dict:
+    """Tests for the wide corridor (five streets merged) against the rest of
+    the city, plus a per-street breakdown."""
+    out = combined_analysis(df_w, outcome)
+    base = yearly_counts(df_w, outcome)
+    out["did_three_group"], _ = did_poisson(base)  # Colfax vs the four other streets vs rest
+    out["fisher"] = exact_share_test(out["counts"], "corridor")
+    zc = yearly_counts(df_w, outcome, by="zone")
+    out["by_street"] = (
+        zc.filter(pl.col("zone") != "rest")
+        .with_columns((pl.col("year") >= FIRST_POST_YEAR).alias("construction"))
+        .group_by("zone", "construction")
+        .agg(pl.col("n").sum().alias("n"), pl.col("year").n_unique().alias("years"))
+        .with_columns((pl.col("n") / pl.col("years")).round(2).alias("per_year"))
+        .sort("zone", "construction")
+    )
+    out["street_counts"] = zc.filter(pl.col("zone") != "rest")
+    out["loo"] = leave_one_year_out(df_w, outcome)
+    try:
+        nb, alpha = did_negbin(base)
+        out["nb_alpha"] = alpha
+    except Exception:
+        out["nb_alpha"] = float("nan")
+    return out
+
+
+def wide_buffer_sensitivity(
+    df_w: pl.DataFrame, geom: dict, buffers=(100.0, 150.0, 250.0, 280.0), outcome: str = "severe"
+) -> pl.DataFrame:
+    """Wide-corridor rate ratio for several buffer widths (feet). The five
+    centerlines are about 570-590 ft apart, so buffers above ~285 ft would
+    overlap."""
+    rows = []
+    for b in buffers:
+        d = wide_groups(assign_zones(df_w.drop("zone", "group", strict=False), geom, buffer_ft=b))
+        counts = combine_corridor(yearly_counts(d, outcome))
+        r = did_combined(counts).row(0, named=True)
+        rows.append(
+            {"buffer_ft": b, "n_corridor": int(counts.filter(pl.col("group") == "corridor")["n"].sum())}
+            | {k: r[k] for k in ("rate_ratio", "ci_low", "ci_high", "p_value")}
+        )
     return pl.DataFrame(rows)
 
 
