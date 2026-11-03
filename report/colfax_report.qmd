@@ -93,6 +93,7 @@ Two definitions of a "severe" crash are shown side by side throughout, because t
 - **13th / 14th Ave:** Severe crashes there fell less than the city under both definitions. The result is statistically convincing only under B, and rests on 15-16 events. It is consistent with some displacement but does not establish it. All crashes on these routes did not change relative to the city.
 - **Combined corridor:** Treating Colfax and 13th / 14th Ave as one unit, severe crashes fell about 15-25% relative to the city, but the interval is wide and includes no change (see [Combined corridor](#combined-corridor)). The Colfax-specific drop is largely offset by the alternative-route increase, though this does not by itself prove displacement.
 - **Wider corridor:** Adding 16th and 17th Ave to the combined unit gives a similar picture: severe crashes fell about 27% relative to the city, with an interval that includes no change (see [Wider corridor](#wider-corridor)).
+- **Seasonality handled in the model:** Dropping the Jan 1 to Sep 27 window and controlling for seasonality with month-of-year effects gives the same Colfax result (A: 0.39, 0.21-0.73; B: 0.18, 0.06-0.52); see [Full-calendar version](#full-calendar). The wider corridor's reduction becomes nominally significant there (about 0.6-0.7) but depends on the specification.
 - **Caveat:** This is an observational comparison with few events. A drop concentrated on Colfax is consistent with construction having an effect, but regression to the mean (under A, Colfax peaked in 2021-2023) or lower traffic volume are alternative explanations.
 
 ## Data quality {#data-quality}
@@ -606,6 +607,104 @@ pl.concat(
 - **All crashes:** The wide corridor shows a clear reduction (0.83, 95% CI 0.76-0.91, p < 0.001) in every specification, driven mainly by Colfax (0.66 alone); the other four streets together did not change (0.94, p = 0.21).
 - **Interpretation:** Over this broader area the data are consistent with a modest net reduction in severe crashes and with no net change. Widening the unit dilutes Colfax's large drop with five-street noise, so it cannot show whether crashes shifted onto parallel streets: the pooled other streets are about flat (rate ratios near 1.1-1.2) with wide intervals.
 
+## Full-calendar version: seasonality handled in the model {#full-calendar}
+
+The analysis above controls for seasonality by using only Jan 1 to Sep 27 of every year, which discards Sep 28 to Dec 31 and the first three months of construction (Oct-Dec 2024). This section keeps all of the data and removes seasonality in the model instead.
+
+**Design.** Counts are zone by calendar month, Jan 2013 to Sep 2026, with nothing after Sep 27, 2026 (construction ended). Each month carries its number of days observed as a Poisson offset, so September 2026 counts as 27 days. Construction runs from Oct 2024, so Oct-Dec 2024 now count as construction. The primary model is the same difference-in-differences as before, with the seasonal control added:
+
+$$\log E[n_{zmy}] = \log(\text{days}_{my}) + \alpha_y + \beta_m + \gamma_z + \delta_{z}\,\text{construction}_{my}$$
+
+Year effects $\alpha_y$ absorb the citywide trend, month-of-year effects $\beta_m$ absorb the shared seasonal pattern, and $\delta_z$ is the log rate ratio for Colfax (or 13th / 14th Ave) relative to the rest of Denver. Standard errors use the same quasi-Poisson rule as before. Alternatives are one effect per calendar month of the sample (the most flexible control), zone-specific first-harmonic seasonality (so Colfax and the alternative routes need not share the city's seasonal shape), zone linear trends, and a version with no seasonal control for contrast.
+
+```{python}
+FC = {o: ca.run_fullcalendar(df, o) for o in ("severe", "severe_counts")}
+for o in FC:
+    FC[o]["wide"] = ca.run_fullcalendar_wide(dfw, o)
+FA, FB = FC["severe"], FC["severe_counts"]
+pt = {k: v["profile_test"] for k, v in FC.items()}
+```
+
+### How strong is the seasonality?
+
+```{python}
+#| label: fig-seasonal-profile
+#| fig-cap: "Citywide seasonal profile: relative crash rate per day by month (1.0 = average month)."
+ca.fig_seasonal_profile({LAB_A: FA["profile"], LAB_B: FB["profile"]})
+```
+
+Severe crashes are clearly seasonal: the citywide rate per day in September is about 1.3 times an average month and in January and February about 0.75 (likelihood-ratio test of month effects, $p < 10^{-16}$ under both definitions). The Jan 1 to Sep 27 window therefore drops the highest-rate days of the year (late September) along with the low winter months. September is the peak month, so the old window cut close to its end.
+
+### Results
+
+```{python}
+def fc_table(specs, terms):
+    return (
+        specs.filter(pl.col("term").is_in(terms))
+        .with_columns(pl.col("term").str.replace("_post", ""))
+        .select("spec", "term", "rate_ratio", "ci_low", "ci_high", "p_value", "dispersion")
+        .with_columns(pl.col(["rate_ratio", "ci_low", "ci_high", "dispersion"]).round(2), pl.col("p_value").round(4))
+    )
+
+pl.concat(
+    [
+        fc_table(FA["specs"], ["colfax_post", "alt_post"]).with_columns(pl.lit(LAB_A).alias("definition")),
+        fc_table(FB["specs"], ["colfax_post", "alt_post"]).with_columns(pl.lit(LAB_B).alias("definition")),
+    ]
+).select("definition", "spec", "term", "rate_ratio", "ci_low", "ci_high", "p_value")
+```
+
+```{python}
+#| label: fig-fullcal-forest
+#| fig-cap: "Full-calendar rate ratios (95% CI) by specification; Colfax and 13th / 14th Ave vs the rest of Denver."
+ca.fig_fullcal_forest({LAB_A: FA["specs"], LAB_B: FB["specs"]})
+```
+
+Comparison with the Jan 1 to Sep 27 analysis (rate ratio vs the rest of Denver, 95% CI):
+
+| Unit | A: windowed | A: full calendar | B: windowed | B: full calendar |
+|---|---|---|---|---|
+| Colfax | 0.38 (0.19-0.79) | 0.39 (0.21-0.73) | 0.26 (0.09-0.70) | 0.18 (0.06-0.52) |
+| 13th / 14th Ave | 1.5 (0.85-2.7) | 1.4 (0.80-2.3) | 2.0 (1.2-3.5) | 1.8 (1.06-3.1) |
+| Colfax + 13th / 14th Ave | 0.75 (0.48-1.16) | 0.69 (0.46-1.06) | 0.85 (0.53-1.36) | 0.71 (0.44-1.13) |
+| Wider corridor | 0.73 (0.48-1.10) | 0.66 (0.45-0.97) | 0.73 (0.47-1.13) | 0.59 (0.38-0.93) |
+
+Combined and wider corridors, all specifications:
+
+```{python}
+pl.concat(
+    [
+        fc_table(FA["combined_specs"], ["corridor_post"]).with_columns(pl.lit("Colfax + 13th / 14th").alias("unit"), pl.lit(LAB_A).alias("definition")),
+        fc_table(FB["combined_specs"], ["corridor_post"]).with_columns(pl.lit("Colfax + 13th / 14th").alias("unit"), pl.lit(LAB_B).alias("definition")),
+        fc_table(FA["wide"]["combined_specs"], ["corridor_post"]).with_columns(pl.lit("Wider corridor").alias("unit"), pl.lit(LAB_A).alias("definition")),
+        fc_table(FB["wide"]["combined_specs"], ["corridor_post"]).with_columns(pl.lit("Wider corridor").alias("unit"), pl.lit(LAB_B).alias("definition")),
+    ]
+).select("unit", "definition", "spec", "rate_ratio", "ci_low", "ci_high", "p_value")
+```
+
+Observed crashes and days of exposure, pre vs construction (full-calendar data):
+
+```{python}
+pl.concat(
+    [
+        ca.fullcal_summary(FA["counts"]).with_columns(pl.lit(LAB_A).alias("definition")),
+        ca.fullcal_summary(FB["counts"]).with_columns(pl.lit(LAB_B).alias("definition")),
+    ]
+).select("definition", "group", "construction", "n", "days", "per_year")
+```
+
+```{python}
+fb = ca.fullcal_buffer_sensitivity(df, geom, outcome="severe")
+fb.filter(pl.col("term") == "colfax_post").select("buffer_ft", "n_colfax", "rate_ratio", "ci_low", "ci_high", "p_value")
+```
+
+- **Colfax:** The estimate barely moves when seasonality is handled in the model: 0.39 under A (about 0.38 with the window) and 0.18 under B (0.26 with the window). It is stable across the specifications and the buffer widths (0.39-0.42 under A). The drop is not an artifact of the Jan to Sep window.
+- **Why seasonality changes so little:** The seasonal swing is large (see the figure), but it is shared by Colfax and the rest of the city, and both periods cover the calendar evenly, so the comparison with the rest of the city cancels it. The "no seasonal control" row (0.40 under A, 0.18 under B) is nearly identical to the primary one. The seasonal terms matter mainly for the standard errors (Pearson dispersion falls from about 1.27 to 0.99 under A) and for the partial final year. In a noise-free simulation (see the tests), the model with seasonal terms recovers the true effect exactly, while the model without them is slightly off.
+- **Where the full-calendar numbers do differ from the windowed ones:** For Colfax under B the point estimate is lower (0.18 vs 0.26). The "Jan-Aug months only" row, which approximates the old window inside the monthly model, gives 0.38 under A and 0.29 under B, close to the windowed results. So the difference comes from the extra months of data (Oct-Dec in every year, and Oct-Dec 2024), not from the seasonal method. Colfax has the same four B-coded construction crashes in both versions, so none fell in the added construction months (Oct-Dec 2024 and Oct-Dec 2025), while the pre period gained B crashes in the added months of every year. Treat the B figure as less certain than its interval suggests.
+- **13th / 14th Ave:** Higher than the city under both definitions (A: 1.4, B: 1.8), but only B is statistically distinguishable from no change. With zone-specific trends the A estimate falls to 1.25 (0.63-2.5) and the B estimate rises to 2.4 (1.1-5.1). This is the same pattern as before: suggestive of displacement, not established.
+- **Combined and wider corridors:** The combined unit's reduction is a little larger than in the windowed analysis (A: 0.69, B: 0.71), and the wider corridor reaches nominal significance (A: 0.66, p = 0.036; B: 0.59, p = 0.024). That significance depends on the specification: with zone-specific trends the wider corridor is 0.56 (p = 0.012) under A but 0.83 (p = 0.49) under B, and the Jan-Aug approximation gives 0.76-0.77 with p of about 0.24-0.30. The wider-corridor units were chosen after seeing earlier results, so this is exploratory and should not be read as a confirmed net benefit.
+- **What this does not do:** The placebo-corridor, spatial-scan and exact conditional tests are not repeated for the full calendar; they still use the Jan to Sep 27 data. The construction start is taken as Oct 1, 2024 (the exact date is not in the data), and Oct 2024 may include a few days before work began. The same observational caveats apply: no traffic-volume data and few Colfax events (11 under A, 4 under B during construction).
+
 ## Limitations
 
 - Few events: Colfax had 8 (A) or 4 (B) severe crashes in the construction period. Confidence intervals are wide. Exact conditional tests give the same conclusion as the Poisson model.
@@ -614,6 +713,7 @@ pl.concat(
 - Regression to the mean: under A, Colfax counts peaked in 2021-2023 before construction started.
 - The 2026 data reach Sep 27 only and may be incomplete because of reporting lag. This would bias toward fewer crashes everywhere, not specifically on Colfax.
 - Multiple tests were run. The Poisson difference-in-differences is the primary test; the rest are supporting evidence.
+- The full-calendar version removes seasonality with model terms, which assumes the seasonal shape is shared with the rest of the city (checked with zone-specific harmonics). It does not repeat the placebo, scan or exact tests.
 
 ## Reproduce this analysis
 
@@ -627,7 +727,7 @@ pl.concat(
 | `report/colfax_report.qmd` | This report; it recomputes every number when rendered |
 | `pyproject.toml`, `uv.lock` | Pinned package versions and the full resolved lockfile used to rebuild the environment |
 | `tests/test_colfax_analysis.py` | Unit tests for the helper functions |
-| `analysis/output/`, `analysis/figures/` | CSV tables and PNG figures written by `analysis/colfax_analysis.py` |
+| `analysis/output/`, `analysis/figures/` | CSV tables and PNG figures written by `analysis/colfax_analysis.py`, including the full-calendar `fullcal_*.csv`, `seasonal_profile.png` and `fullcal_forest.png` |
 
 **How to rerun**
 

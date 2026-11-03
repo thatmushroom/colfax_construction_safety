@@ -13,7 +13,7 @@ This is an observational before-and-after comparison (a difference-in-difference
 - **Outcome:** crashes with a fatality or serious bodily injury, counted per crash. Two definitions are reported side by side because they disagree:
   - **A, offense code:** the crash's top offense is FATAL or SBI. This reproduces the 318 SBI events quoted for 2025.
   - **B, count columns:** `SERIOUSLY_INJURED` or `FATALITIES` is greater than zero.
-- **Seasonality control:** only January 1 to September 27 of each year is used, and no data after 2026-09-27.
+- **Seasonality control:** in the main analysis only January 1 to September 27 of each year is used, and no data after 2026-09-27. A second version drops that window and controls for seasonality in the model (see below).
 - **Periods:** pre-construction is 2013-2024; construction is 2025-2026.
 - **Treated unit:** Colfax between the Broadway and Colorado Blvd intersections (crashes within 250 ft of the centerline). Variants combine Colfax with 13th and 14th Ave, and with 13th, 14th, 16th and 17th Ave, as one corridor.
 - **Comparison:** the rest of Denver, which absorbs any citywide change.
@@ -35,6 +35,22 @@ A rate ratio below 1 means a unit fell more than the rest of the city.
 | 13th / 14th Ave alone | 1.5 (0.85-2.7), p = 0.16 | 2.0 (1.2-3.5), p = 0.013 |
 | Colfax + 13th / 14th Ave combined | 0.75 (0.48-1.16), p = 0.19 | 0.85 (0.53-1.36), p = 0.51 |
 | Wider corridor (13th, 14th, Colfax, 16th, 17th Ave) | 0.73 (0.48-1.10), p = 0.13 | 0.73 (0.47-1.13), p = 0.16 |
+
+### Full-calendar version (seasonality handled in the model)
+
+The results above use only Jan 1 to Sep 27 of each year. A second version keeps every month from January 2013 to September 27, 2026 and removes seasonality in the model: zone-by-month counts, a log-days offset (September 2026 counts as 27 days), and year plus month-of-year effects. Oct-Dec 2024 counts as construction here. Rate ratios against the rest of Denver:
+
+| Comparison | A: offense code | B: count columns |
+|---|---|---|
+| Colfax alone | 0.39 (0.21-0.73), p = 0.003 | 0.18 (0.06-0.52), p = 0.001 |
+| 13th / 14th Ave alone | 1.4 (0.80-2.3), p = 0.25 | 1.8 (1.06-3.1), p = 0.029 |
+| Colfax + 13th / 14th Ave combined | 0.69 (0.46-1.06), p = 0.092 | 0.71 (0.44-1.13), p = 0.15 |
+| Wider corridor | 0.66 (0.45-0.97), p = 0.036 | 0.59 (0.38-0.93), p = 0.024 |
+
+- Seasonality is strong (citywide rate per day is about 1.3 times average in September and 0.75 in January), but the Colfax estimate does not depend on how it is handled: month-of-sample effects, zone-specific seasonality and even no seasonal control give nearly the same answer, because Colfax and the rest of the city share the seasonal pattern.
+- Colfax is robust to the window. The B estimate is lower than before (0.18 vs 0.26) because of the extra months of data, not the seasonal method.
+- The wider corridor's reduction is nominally significant here, but it depends on the specification (with zone-specific trends it is 0.56 under A and 0.83, not significant, under B) and the corridor was chosen after seeing earlier results.
+- Placebo, spatial-scan and exact tests are not repeated for the full calendar. Details, sensitivity table and figures are in the report section "Full-calendar version".
 
 ## Conclusions
 
@@ -73,6 +89,7 @@ See the "Reproduce this analysis" section of the report for details.
 | Path | Purpose |
 |---|---|
 | `analysis/colfax_analysis.py` | All data cleaning, zone assignment, tests and figure functions |
+| `analysis/output/fullcal_*.csv`, `analysis/figures/seasonal_profile.png`, `fullcal_forest.png` | Full-calendar tables and figures, written by `python analysis/colfax_analysis.py` |
 | `colfax_analysis.ipynb` | Notebook that runs the analysis and shows tables and figures |
 | `report/colfax_report.qmd` | Quarto report with the full results |
 | `tests/` | Unit tests for the helper functions |

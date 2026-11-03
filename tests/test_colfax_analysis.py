@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "analysis"))
 import colfax_analysis as ca  # noqa: E402
@@ -126,3 +127,96 @@ def test_wide_groups_labels_streets_and_keeps_missing_coordinates():
     df = pl.DataFrame({"zone": ["colfax", "alt_13th", "alt_14th", "alt_16th", "alt_17th", "rest", None]})
     g = ca.wide_groups(df).get_column("group").to_list()
     assert g == ["colfax", "alt", "alt", "alt", "alt", "rest", None]
+
+
+def _crashes(rows):
+    from datetime import datetime
+
+    return pl.DataFrame(
+        {
+            "dt": [datetime(*r[0]) for r in rows],
+            "group": [r[1] for r in rows],
+            "sev": [True] * len(rows),
+        }
+    )
+
+
+def test_monthly_counts_grid_exposure_and_cutoff():
+    df = _crashes(
+        [
+            ((2026, 9, 27, 12), "rest"),  # last day in the analysis
+            ((2026, 9, 28, 0), "rest"),  # after construction ended: dropped
+            ((2013, 1, 5, 0), "colfax"),
+        ]
+    )
+    m = ca.monthly_counts(df, "sev")
+    assert m.get_column("ym").min().isoformat() == "2013-01-01"
+    assert m.get_column("ym").max().isoformat() == "2026-09-01"
+    n_months = (2026 - 2013) * 12 + 9
+    assert m.height == 2 * n_months  # complete grid for both groups
+    last = m.filter(pl.col("ym") == pl.date(2026, 9, 1))
+    assert last.get_column("days").to_list() == [27, 27]
+    assert m.filter(pl.col("ym") == pl.date(2013, 2, 1)).get_column("days").unique().to_list() == [28]
+    assert m.filter(pl.col("group") == "rest").get_column("n").sum() == 1  # Sep 28 dropped
+    assert m.filter(pl.col("group") == "colfax").get_column("n").sum() == 1
+
+
+def _expected_counts(effect: float, season: dict[int, float]) -> pl.DataFrame:
+    """Noise-free expected monthly counts: shared seasonality and trend, a
+    construction effect on Colfax only (months from Oct 2024)."""
+    months = pl.DataFrame({"ym": pl.date_range(pl.date(2013, 1, 1), pl.date(2026, 9, 1), "1mo", eager=True)})
+    base = {"colfax": 2.0, "alt": 1.0, "rest": 60.0}
+    out = []
+    for g, b in base.items():
+        out.append(
+            months.with_columns(
+                pl.lit(g).alias("group"),
+                pl.col("ym").dt.year().alias("year"),
+                pl.col("ym").dt.month().cast(pl.Int64).alias("month"),
+            )
+        )
+    c = pl.concat(out).with_columns(
+        pl.when(pl.col("ym") == pl.date(2026, 9, 1)).then(27).otherwise(30).alias("days")
+    )
+    return c.with_columns(
+        (
+            pl.col("group").replace_strict(base, return_dtype=pl.Float64)
+            * pl.col("month").replace_strict(season, return_dtype=pl.Float64)
+            * (1 + 0.02 * (pl.col("year") - 2013))
+            * pl.col("days")
+            / 30
+            * pl.when((pl.col("group") == "colfax") & (pl.col("ym") >= pl.date(2024, 10, 1)))
+            .then(effect)
+            .otherwise(1.0)
+        ).alias("n")
+    )
+
+
+@pytest.mark.filterwarnings("ignore::Warning")
+def test_did_poisson_monthly_recovers_effect_with_seasonality_and_partial_month():
+    season = {m: 1.0 + 0.4 * np.sin(2 * np.pi * (m - 0.5) / 12) for m in range(1, 13)}
+    counts = _expected_counts(0.5, season)
+    for spec in ("month", "time", "zone_harmonic"):
+        tab, _ = ca.did_poisson_monthly(counts, seasonality=spec)
+        rr = tab.filter(pl.col("term") == "colfax_post").get_column("rate_ratio").item()
+        assert abs(rr - 0.5) < 1e-6, spec
+        alt = tab.filter(pl.col("term") == "alt_post").get_column("rate_ratio").item()
+        assert abs(alt - 1.0) < 1e-6, spec
+    # without a seasonal control the partial 2026 year leaves a small bias
+    tab, _ = ca.did_poisson_monthly(counts, seasonality="none")
+    rr = tab.filter(pl.col("term") == "colfax_post").get_column("rate_ratio").item()
+    assert 1e-4 < abs(rr - 0.5) < 0.05
+
+
+def test_seasonal_profile_detects_cycle():
+    rng = np.random.default_rng(3917)
+    rows = []
+    for y in range(2013, 2026):
+        for m in range(1, 13):
+            lam = 80 * (1 + 0.5 * np.sin(2 * np.pi * (m - 0.5) / 12))
+            for _ in range(rng.poisson(lam)):
+                rows.append(((y, m, 15), "rest"))
+    prof, test = ca.seasonal_profile(_crashes(rows), "sev")
+    assert test["p_value"] < 1e-6
+    assert prof.get_column("relative_rate").arg_max() in (2, 3)  # peak in spring (Mar/Apr)
+    assert abs(prof.get_column("relative_rate").mean() - 1.0) < 1e-9

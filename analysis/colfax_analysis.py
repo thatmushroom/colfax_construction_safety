@@ -24,8 +24,10 @@ Design
 
 from __future__ import annotations
 
+import math
 import os
 import warnings
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +44,10 @@ OUT_DIR = ROOT / "analysis" / "output"
 FIG_DIR = ROOT / "analysis" / "figures"
 
 CUTOFF_MONTH, CUTOFF_DAY = 9, 27
+# Full-calendar version (seasonality handled in the model, no Jan-Sep window)
+CONSTRUCTION_START = date(2024, 10, 1)  # first month under construction
+FULLCAL_END_EXCL = datetime(2026, 9, 28)  # construction ended Sep 27, 2026
+MONTHLY_KEYS = ("ym", "month", "days")  # extra columns carried by monthly counts
 FIRST_POST_YEAR = 2025  # Jan-Sep of 2025 and 2026 are under construction
 SEVERE_OFFENSES = ("TRAF - ACCIDENT - FATAL", "TRAF - ACCIDENT - SBI")
 ZONE_ORDER = ["colfax", "alt_13th", "alt_14th", "rest"]
@@ -342,13 +348,15 @@ def _model_frame(counts: pl.DataFrame, drop_years=(), pre_years=None) -> "pd.Dat
     return c.to_pandas()
 
 
-def _fit_glm(formula: str, data):
+def _fit_glm(formula: str, data, offset=None):
     """Poisson GLM; SEs are inflated by the Pearson dispersion when it exceeds 1
     (quasi-Poisson) but never deflated (these counts are small, so we stay
-    conservative when the data look under-dispersed)."""
-    fit = smf.glm(formula, data, family=sm.families.Poisson()).fit()
+    conservative when the data look under-dispersed). ``offset`` is an optional
+    log-exposure vector."""
+    kw = {} if offset is None else {"offset": np.asarray(offset, dtype=float)}
+    fit = smf.glm(formula, data, family=sm.families.Poisson(), **kw).fit()
     dispersion = float(fit.pearson_chi2 / fit.df_resid)
-    qfit = smf.glm(formula, data, family=sm.families.Poisson()).fit(
+    qfit = smf.glm(formula, data, family=sm.families.Poisson(), **kw).fit(
         scale=dispersion if dispersion > 1 else 1.0
     )
     return fit, qfit, dispersion
@@ -503,9 +511,9 @@ def combine_corridor(counts: pl.DataFrame) -> pl.DataFrame:
             .otherwise(pl.col("group"))
             .alias("group")
         )
-        .group_by("group", "year")
+        .group_by("group", "year", *[c for c in MONTHLY_KEYS if c in counts.columns])
         .agg(pl.col("n").sum())
-        .sort("group", "year")
+        .sort("group", "year", *[c for c in MONTHLY_KEYS if c in counts.columns])
     )
 
 
@@ -1016,6 +1024,296 @@ def run_primary(df: pl.DataFrame, geom: dict, n_sims: int = 999, outcome: str = 
 
 
 # --------------------------------------------------------------------------
+# Full-calendar version: seasonality handled in the model, not by a window
+# --------------------------------------------------------------------------
+def monthly_counts(df: pl.DataFrame, outcome: str = "severe", by: str = "group") -> pl.DataFrame:
+    """Zone x calendar-month counts of outcome crashes for every month from the
+    first observed month to Sep 2026 (complete grid, zeros filled).
+
+    Nothing after Sep 27, 2026 is used (construction ended). ``days`` is the
+    exposure of each cell, the number of days observed in that month (Sep 2026
+    has 27), and is used as a Poisson offset by the monthly models.
+    """
+    d = df.filter(
+        pl.col(by).is_not_null() & pl.col("dt").is_not_null() & (pl.col("dt") < FULLCAL_END_EXCL)
+    ).with_columns(pl.col("dt").dt.truncate("1mo").dt.date().alias("ym"))
+    first = d.get_column("ym").min()
+    last = FULLCAL_END_EXCL.date().replace(day=1)
+    months = pl.DataFrame({"ym": pl.date_range(first, last, "1mo", eager=True)})
+    groups = pl.DataFrame({by: sorted(d.get_column(by).unique().to_list())})
+    grid = groups.join(months, how="cross").with_columns(
+        pl.col("ym").dt.year().alias("year"),
+        pl.col("ym").dt.month().cast(pl.Int64).alias("month"),
+        (
+            pl.min_horizontal(pl.col("ym").dt.offset_by("1mo"), pl.lit(FULLCAL_END_EXCL.date()))
+            - pl.col("ym")
+        )
+        .dt.total_days()
+        .alias("days"),
+    )
+    n = d.filter(pl.col(outcome)).group_by(by, "ym").agg(pl.len().alias("n"))
+    return (
+        grid.join(n, on=[by, "ym"], how="left")
+        .with_columns(pl.col("n").fill_null(0))
+        .rename({by: "group"} if by != "group" else {})
+        .sort("group", "ym")
+    )
+
+
+def _monthly_frame(
+    counts: pl.DataFrame,
+    drop_years=(),
+    pre_start: date | None = None,
+    post_start: date = CONSTRUCTION_START,
+    max_month: int | None = None,
+):
+    """Model frame (pandas) for the monthly models.
+
+    ``post`` is 1 from ``post_start``. If ``post_start`` is later than the real
+    construction start, the months in between are dropped, not relabelled.
+    ``max_month`` keeps only Jan..max_month (used to approximate the old window).
+    """
+    c = counts.filter(~pl.col("year").is_in(list(drop_years)))
+    if pre_start is not None:
+        c = c.filter(pl.col("ym") >= pre_start)
+    if post_start != CONSTRUCTION_START:
+        c = c.filter(~((pl.col("ym") >= CONSTRUCTION_START) & (pl.col("ym") < post_start)))
+    if max_month is not None:
+        c = c.filter(pl.col("month") <= max_month)
+    ang = 2 * math.pi * (pl.col("month") - 0.5) / 12
+    c = c.with_columns(
+        (pl.col("ym") >= post_start).cast(pl.Int8).alias("post"),
+        ang.sin().alias("sin1"),
+        ang.cos().alias("cos1"),
+        (pl.col("year") + (pl.col("month") - 0.5) / 12 - 2019.0).alias("t"),
+        pl.col("ym").cast(pl.String).alias("ym_label"),
+        pl.col("days").cast(pl.Float64).log().alias("log_days"),
+    )
+    for u in ("colfax", "alt", "corridor"):
+        c = c.with_columns((pl.col("group") == u).cast(pl.Int8).alias(f"is_{u}")).with_columns(
+            (pl.col(f"is_{u}") * pl.col("post")).alias(f"{u}_post"),
+            (pl.col(f"is_{u}") * pl.col("sin1")).alias(f"{u}_sin"),
+            (pl.col(f"is_{u}") * pl.col("cos1")).alias(f"{u}_cos"),
+            (pl.col(f"is_{u}") * pl.col("t")).alias(f"{u}_t"),
+        )
+    return c.to_pandas()
+
+
+SEASONALITY_FE = {
+    "month": "C(year) + C(month)",  # shared month-of-year effects + year effects (primary)
+    "time": "C(ym_label)",  # one effect per calendar month of the sample (most flexible)
+    "zone_harmonic": "C(year) + C(month)",  # primary + zone-specific first-harmonic seasonality
+    "none": "C(year)",  # no seasonal control (for contrast only)
+}
+
+
+def _did_monthly(
+    counts: pl.DataFrame,
+    units: list[str],
+    seasonality: str = "month",
+    trend: bool = False,
+    **frame_kw,
+) -> tuple[pl.DataFrame, float]:
+    """Poisson difference-in-differences on zone x month counts with a
+    log-exposure offset. ``seasonality`` picks how seasonal swings are removed
+    (see ``SEASONALITY_FE``); the citywide (``rest``) trend and seasonality are
+    absorbed by the fixed effects, so ``<unit>_post`` is the unit's rate ratio
+    (construction / pre) relative to the rest of the city."""
+    if seasonality not in SEASONALITY_FE:
+        raise ValueError(f"seasonality must be one of {list(SEASONALITY_FE)}")
+    df = _monthly_frame(counts, **frame_kw)
+    rhs = [SEASONALITY_FE[seasonality]]
+    rhs += [f"is_{u}" for u in units] + [f"{u}_post" for u in units]
+    if seasonality == "zone_harmonic":
+        rhs += [f"{u}_{h}" for u in units for h in ("sin", "cos")]
+    if trend:
+        rhs += [f"{u}_t" for u in units]
+    fit, qfit, dispersion = _fit_glm("n ~ " + " + ".join(rhs), df, offset=df["log_days"])
+    return _tidy(fit, qfit, [f"{u}_post" for u in units]), dispersion
+
+
+def did_poisson_monthly(counts: pl.DataFrame, seasonality: str = "month", trend: bool = False, **kw):
+    """Colfax and 13th/14th Ave vs the rest of the city (monthly counts from
+    :func:`monthly_counts`). Returns (tidy table, Pearson dispersion)."""
+    return _did_monthly(counts, ["colfax", "alt"], seasonality, trend, **kw)
+
+
+def did_combined_monthly(counts: pl.DataFrame, seasonality: str = "month", trend: bool = False, **kw):
+    """Combined corridor vs the rest of the city (``counts`` from
+    :func:`combine_corridor` applied to monthly counts)."""
+    return _did_monthly(counts, ["corridor"], seasonality, trend, **kw)
+
+
+def seasonal_profile(df: pl.DataFrame, outcome: str = "severe") -> tuple[pl.DataFrame, dict]:
+    """Citywide month-of-year profile of outcome crashes and a test that it is
+    not flat. Poisson model ``n ~ C(year) + C(month)`` on citywide monthly
+    counts with a log-days offset; ``relative_rate`` is exp(month effect)
+    divided by the mean over months (1.0 = an average month). The likelihood-ratio
+    test is scaled by the Pearson dispersion when that exceeds 1."""
+    m = monthly_counts(df, outcome)
+    c = m.group_by("ym", "year", "month", "days").agg(pl.col("n").sum()).sort("ym")
+    d = c.with_columns(pl.col("days").cast(pl.Float64).log().alias("log_days")).to_pandas()
+    kw = {"family": sm.families.Poisson(), "offset": d["log_days"].to_numpy()}
+    full = smf.glm("n ~ C(year) + C(month)", d, **kw).fit()
+    reduced = smf.glm("n ~ C(year)", d, **kw).fit()
+    disp = max(float(full.pearson_chi2 / full.df_resid), 1.0)
+    lr = float((reduced.deviance - full.deviance) / disp)
+    df_lr = int(reduced.df_resid - full.df_resid)
+    coefs = np.array([0.0] + [full.params[f"C(month)[T.{k}]"] for k in range(2, 13)])
+    rel = np.exp(coefs) / np.exp(coefs).mean()
+    profile = pl.DataFrame({"month": list(range(1, 13)), "relative_rate": rel})
+    return profile, {"lr": lr, "df": df_lr, "p_value": float(stats.chi2.sf(lr, df_lr)), "dispersion": disp}
+
+
+FULLCAL_SPECS = {
+    "primary: year + month-of-year effects": dict(seasonality="month"),
+    "month-of-sample effects": dict(seasonality="time"),
+    "zone-specific seasonality (harmonics)": dict(seasonality="zone_harmonic"),
+    "month-of-year + zone linear trends": dict(seasonality="month", trend=True),
+    "excluding 2020": dict(seasonality="month", drop_years=(2020,)),
+    "2021 to Sep 2024 baseline": dict(seasonality="month", pre_start=date(2021, 1, 1)),
+    "Oct-Dec 2024 excluded (post from Jan 2025)": dict(seasonality="month", post_start=date(2025, 1, 1)),
+    "Jan-Aug months only (approximates old window)": dict(seasonality="month", max_month=8),
+    "no seasonal control (contrast)": dict(seasonality="none"),
+}
+
+
+def fullcal_specs(counts: pl.DataFrame, combined: bool = False) -> pl.DataFrame:
+    """Rate ratios under every full-calendar specification. ``counts`` are
+    monthly counts (Colfax / alt / rest), or, with ``combined=True``, monthly
+    counts already merged by :func:`combine_corridor`."""
+    fn = did_combined_monthly if combined else did_poisson_monthly
+    rows = []
+    for name, kw in FULLCAL_SPECS.items():
+        tab, disp = fn(counts, **kw)
+        for r in tab.iter_rows(named=True):
+            rows.append({"spec": name, "dispersion": disp} | r)
+    return pl.DataFrame(rows)
+
+
+def fullcal_buffer_sensitivity(
+    df: pl.DataFrame, geom: dict, buffers=(100.0, 150.0, 250.0, 300.0), outcome: str = "severe"
+) -> pl.DataFrame:
+    """Primary monthly DiD re-estimated for several corridor buffer widths (ft)."""
+    rows = []
+    for b in buffers:
+        d = zone_group(assign_zones(df.drop("zone", "group", strict=False), geom, buffer_ft=b))
+        counts = monthly_counts(d, outcome)
+        tab, _ = did_poisson_monthly(counts)
+        for r in tab.iter_rows(named=True):
+            rows.append({"buffer_ft": b, "n_colfax": int(counts.filter(pl.col("group") == "colfax")["n"].sum())} | r)
+    return pl.DataFrame(rows)
+
+
+def run_fullcalendar(df: pl.DataFrame, outcome: str = "severe") -> dict:
+    """Full-calendar analysis for one outcome. ``df`` has ``group`` assigned."""
+    counts = monthly_counts(df, outcome)
+    comb = combine_corridor(counts)
+    profile, profile_test = seasonal_profile(df, outcome)
+    return {
+        "outcome": outcome,
+        "counts": counts,
+        "specs": fullcal_specs(counts),
+        "combined_specs": fullcal_specs(comb, combined=True),
+        "profile": profile,
+        "profile_test": profile_test,
+    }
+
+
+def run_fullcalendar_wide(df_w: pl.DataFrame, outcome: str = "severe") -> dict:
+    """Full-calendar analysis for the wide corridor (13th, 14th, Colfax, 16th,
+    17th Ave merged). ``df_w`` comes from :func:`prepare_wide`."""
+    counts = monthly_counts(df_w, outcome)
+    comb = combine_corridor(counts)
+    return {"outcome": outcome, "counts": comb, "combined_specs": fullcal_specs(comb, combined=True)}
+
+
+def fullcal_summary(counts: pl.DataFrame) -> pl.DataFrame:
+    """Observed crashes and days of exposure per group, pre vs construction."""
+    return (
+        counts.with_columns((pl.col("ym") >= CONSTRUCTION_START).alias("construction"))
+        .group_by("group", "construction")
+        .agg(pl.col("n").sum(), pl.col("days").sum())
+        .with_columns((pl.col("n") / pl.col("days") * 365.25).round(2).alias("per_year"))
+        .sort("group", "construction")
+    )
+
+
+def fig_seasonal_profile(profiles: dict[str, pl.DataFrame]):
+    """Citywide month-of-year profile (1.0 = average month), one line per definition."""
+    from plotnine import aes, geom_hline, geom_line, geom_point, ggplot, labs, scale_x_continuous, theme_minimal
+
+    d = pl.concat([p.with_columns(pl.lit(k).alias("definition")) for k, p in profiles.items()])
+    return (
+        ggplot(d, aes("month", "relative_rate", color="definition"))
+        + geom_hline(yintercept=1, linetype="dashed", color="grey")
+        + geom_line(size=1)
+        + geom_point(size=2)
+        + scale_x_continuous(breaks=list(range(1, 13)))
+        + labs(
+            title="Citywide seasonal profile of severe crashes",
+            subtitle="Relative rate per day after removing year effects (1.0 = average month)",
+            x="Month",
+            y="Relative rate",
+            color=None,
+        )
+        + theme_minimal()
+    )
+
+
+def fig_fullcal_forest(specs: dict[str, pl.DataFrame]):
+    """Rate ratios (95% CI) by specification for Colfax and 13th/14th Ave, one
+    panel per outcome definition. ``specs`` maps a definition label to the
+    ``specs`` table from :func:`fullcal_specs`."""
+    from plotnine import (
+        aes, element_text, facet_grid, geom_point, geom_segment, geom_vline, ggplot, labs, scale_x_log10, theme, theme_minimal,
+    )
+
+    d = pl.concat([t.with_columns(pl.lit(k).alias("definition")) for k, t in specs.items()]).with_columns(
+        pl.col("term").replace({"colfax_post": "Colfax", "alt_post": "13th / 14th Ave"}).alias("unit")
+    )
+    order = list(FULLCAL_SPECS)[::-1]
+    d = d.with_columns(pl.col("spec").cast(pl.Enum(order)))
+    return (
+        ggplot(d, aes(y="spec", x="rate_ratio"))
+        + geom_vline(xintercept=1, linetype="dashed", color="grey")
+        + geom_segment(aes(x="ci_low", xend="ci_high", yend="spec"))
+        + geom_point(size=2)
+        + facet_grid("definition ~ unit")
+        + scale_x_log10()
+        + labs(
+            title="Full-calendar DiD rate ratios by specification",
+            subtitle="Rate ratio vs the rest of Denver, construction vs pre",
+            x="Rate ratio (log scale)",
+            y="",
+        )
+        + theme_minimal()
+        + theme(axis_text_y=element_text(size=7))
+    )
+
+
+def save_fullcal_outputs(fullcal: dict, out_dir: Path = OUT_DIR, fig_dir: Path = FIG_DIR) -> None:
+    """Write the full-calendar tables and figures. ``fullcal`` maps an outcome
+    name (``severe`` / ``severe_counts``) to :func:`run_fullcalendar` results."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    for name, r in fullcal.items():
+        r["specs"].write_csv(out_dir / f"fullcal_did_{name}.csv")
+        r["combined_specs"].write_csv(out_dir / f"fullcal_combined_{name}.csv")
+        r["profile"].write_csv(out_dir / f"fullcal_profile_{name}.csv")
+        if "wide" in r:
+            r["wide"]["combined_specs"].write_csv(out_dir / f"fullcal_wide_{name}.csv")
+    labels = {"severe": "A: offense code", "severe_counts": "B: count columns"}
+    keep = [k for k in labels if k in fullcal]
+    fig_seasonal_profile({labels[k]: fullcal[k]["profile"] for k in keep}).save(
+        fig_dir / "seasonal_profile.png", width=8, height=4.5, dpi=150, verbose=False
+    )
+    fig_fullcal_forest({labels[k]: fullcal[k]["specs"] for k in keep}).save(
+        fig_dir / "fullcal_forest.png", width=10, height=6, dpi=150, verbose=False
+    )
+
+
+# --------------------------------------------------------------------------
 # Figures and tables
 # --------------------------------------------------------------------------
 GROUP_LABELS = {"colfax": "Colfax (Broadway-Colorado)", "alt": "13th / 14th Ave", "rest": "Rest of city"}
@@ -1176,7 +1474,12 @@ def main(n_sims: int = 999) -> dict:
         df.with_columns(pl.lit(True).alias("all_crashes")), geom, n_sims=min(n_sims, 199), outcome="all_crashes"
     )
     save_outputs(df, geom, results)
-    return {"df": df, "geom": geom, "results": results}
+    fullcal = {o: run_fullcalendar(df, o) for o in ("severe", "severe_counts")}
+    df_w, _ = prepare_wide()
+    for o, r in fullcal.items():
+        r["wide"] = run_fullcalendar_wide(df_w, o)
+    save_fullcal_outputs(fullcal)
+    return {"df": df, "geom": geom, "results": results, "fullcal": fullcal}
 
 
 if __name__ == "__main__":
