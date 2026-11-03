@@ -16,6 +16,40 @@ def test_explode_streets_normalises_names():
     assert streets == ["COLFAX AVE", "BROADWAY ST", "14TH AVE", "COLFAX AVE"]
 
 
+def test_fatal_reconciliation_lower_bound():
+    df = pl.DataFrame(
+        {
+            "incident_id": ["a", "b", "c", "d"],
+            "year": [2024, 2024, 2024, 2024],
+            "n_fatal": [2, None, 0, 0],
+            "fatal_offense": [True, True, False, False],
+        }
+    )
+    out = ca.fatal_reconciliation(df, dashboard={2024: 5}, first_year=2024)
+    row = out.row(0, named=True)
+    assert row["fatal_incidents"] == 2
+    assert row["sum_fatalities"] == 2
+    assert row["lower_bound"] == 3  # max(2,1) + max(0,1)
+    assert row["gap"] == 2
+
+
+def test_find_csv_prefers_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLFAX_CSV", str(tmp_path / "x.csv"))
+    assert ca.find_csv() == tmp_path / "x.csv"
+
+
+def test_find_csv_picks_newest(monkeypatch, tmp_path):
+    import os
+
+    monkeypatch.delenv("COLFAX_CSV", raising=False)
+    old, new = tmp_path / "b_old.csv", tmp_path / "a_new.csv"
+    old.write_text("x")
+    new.write_text("x")
+    os.utime(old, (1_000, 1_000))
+    os.utime(new, (2_000, 2_000))
+    assert ca.find_csv(tmp_path) == new
+
+
 def test_seasonal_window_excludes_after_sep_27():
     from datetime import datetime
 

@@ -24,6 +24,7 @@ Design
 
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 
@@ -50,10 +51,15 @@ ZONE_ORDER = ["colfax", "alt_13th", "alt_14th", "rest"]
 # Loading and cleaning
 # --------------------------------------------------------------------------
 def find_csv(data_dir: Path = DATA_DIR) -> Path:
-    files = sorted(data_dir.glob("*.csv"))
+    """Return the CSV to analyse: $COLFAX_CSV if set, else the most recently
+    modified ``*.csv`` in ``data_dir`` (so a fresh download wins over older ones)."""
+    override = os.environ.get("COLFAX_CSV")
+    if override:
+        return Path(override)
+    files = sorted(data_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime)
     if not files:
         raise FileNotFoundError(f"No CSV found in {data_dir}")
-    return files[0]
+    return files[-1]
 
 
 def load_crashes(path: Path | None = None) -> pl.DataFrame:
@@ -128,6 +134,39 @@ def reconcile_2025(df: pl.DataFrame) -> pl.DataFrame:
             ],
         }
     )
+
+
+def fatal_reconciliation(
+    df: pl.DataFrame, dashboard: dict[int, int] | None = None, first_year: int = 2022
+) -> pl.DataFrame:
+    """Per-year deaths implied by the CSV, set against dashboard totals.
+
+    ``FATALITIES`` is blank or 0 for many FATAL-coded crashes, so summing it
+    undercounts. The lower bound counts every incident that is FATAL-coded or
+    has ``FATALITIES`` > 0 as at least one death: ``max(FATALITIES, 1)``.
+    """
+    out = (
+        df.filter(pl.col("fatal_offense") | (pl.col("n_fatal").fill_null(0) > 0))
+        .group_by("incident_id")
+        .agg(
+            pl.col("year").min(),
+            pl.col("n_fatal").max().fill_null(0).alias("recorded"),
+        )
+        .with_columns(pl.max_horizontal("recorded", pl.lit(1)).alias("lower_bound"))
+        .group_by("year")
+        .agg(
+            pl.len().alias("fatal_incidents"),
+            pl.col("recorded").sum().alias("sum_fatalities"),
+            pl.col("lower_bound").sum().alias("lower_bound"),
+        )
+        .filter(pl.col("year") >= first_year)
+        .sort("year")
+    )
+    if dashboard:
+        out = out.with_columns(
+            pl.col("year").replace_strict(dashboard, default=None).alias("dashboard")
+        ).with_columns((pl.col("dashboard") - pl.col("lower_bound")).alias("gap"))
+    return out
 
 
 def offense_vs_counts(df: pl.DataFrame, first_year: int = 2018) -> pl.DataFrame:
